@@ -4,6 +4,7 @@
 
 import 'package:apps.modular.lib.app.dart/app.dart';
 import 'package:apps.modular.services.application/service_provider.fidl.dart';
+import 'package:apps.modular.services.application/application_launcher.fidl.dart';
 import 'package:apps.modular.services.document_store/document.fidl.dart';
 import 'package:apps.modular.services.story/link.fidl.dart';
 import 'package:apps.modular.services.story/module.fidl.dart';
@@ -11,12 +12,17 @@ import 'package:apps.modular.services.story/module_controller.fidl.dart';
 import 'package:apps.modular.services.story/story.fidl.dart';
 import 'package:apps.mozart.lib.flutter/child_view.dart';
 import 'package:apps.mozart.services.views/view_token.fidl.dart';
+import 'package:apps.xi_editor.rust..interfaces/xi.fidl.dart';
 import 'package:flutter/material.dart';
 import 'package:lib.fidl.dart/bindings.dart';
+import 'package:lib.fidl.dart/core.dart' as core;
+import 'dart:typed_data';
+import 'dart:convert';
 
 final ApplicationContext _context = new ApplicationContext.fromStartupInfo();
 
-final GlobalKey<_HomeScreenState> _homeKey = new GlobalKey<_HomeScreenState>();
+final GlobalKey<_HomeScreenState> _homeKey =
+    new GlobalKey<_HomeScreenState>();
 
 final String _kDocId = 'counter-doc-id';
 final String _kCounterValueKey = 'counter-key';
@@ -204,6 +210,57 @@ class _HomeScreenState extends State<_HomeScreen> {
   }
 }
 
+typedef void StringCallback(String string);
+
+class XiPeer {
+  StringCallback onRead = null;
+
+  final JsonProxy _jsonProxy = new JsonProxy();
+  core.SocketReader _reader = new core.SocketReader();
+  Uint8List _buf = new Uint8List(4096);
+  List<int> _fragment = new List();
+  static const Utf8Encoder _utf8Encoder = const Utf8Encoder();
+  static const Utf8Decoder _utf8Decoder = const Utf8Decoder();
+  static const int newlineChar = 0x0a;
+
+  void bind(InterfaceHandle handle) {
+    _jsonProxy.ctrl.bind(handle);
+    final core.SocketPair pair = new core.SocketPair();
+    _jsonProxy.connectSocket(pair.socket0);
+    _reader.bind(pair.passSocket1());
+    _reader.onReadable = _handleRead;
+  }
+
+  void send(String string) {
+    final utf8 = _utf8Encoder.convert(string);
+    final bytes = new Uint8List.fromList(utf8);
+    _reader.socket.write(bytes.buffer.asByteData());
+  }
+
+  void _handleRead() {
+    final core.SocketReadResult readResult =
+        _reader.socket.read(_buf.buffer.asByteData());
+    if (readResult.status == core.NO_ERROR) {
+      int start = 0;
+      int length = readResult.bytesRead;
+      if (onRead != null) {
+        for (int i = 0; i < length; i++) {
+          if (_buf[i] == newlineChar) {
+            _fragment.addAll(_buf.getRange(start, i + 1));
+            start = i + 1;
+            String string = _utf8Decoder.convert(_fragment);
+            onRead(string);
+            _fragment.clear();
+          }
+        }
+      }
+      if (start < length) {
+        _fragment.addAll(_buf.getRange(start, length));
+      }
+    }
+  }
+}
+
 /// Main entry point to the example parent module.
 void main() {
   _log('Parent module started with context: $_context');
@@ -215,6 +272,18 @@ void main() {
     },
     Module.serviceName,
   );
+
+  final ServiceProviderProxy serviceProvider = new ServiceProviderProxy();
+  final ApplicationLaunchInfo launchInfo = new ApplicationLaunchInfo()
+    ..url = 'file:///system/apps/xi-core'
+    ..services = serviceProvider.ctrl.request();
+  _context.launcher.createApplication(launchInfo, null);
+  final XiPeer xi = new XiPeer();
+  xi.bind(connectToServiceByName(serviceProvider, 'xi.Json'));
+  xi.onRead = (String string) {
+    _log("got string $string");
+  };
+  xi.send("{\"method\": \"new_tab\", \"params\": \"[]\", \"id\": 1}\n");
 
   runApp(new MaterialApp(
     title: 'Counter Parent',
